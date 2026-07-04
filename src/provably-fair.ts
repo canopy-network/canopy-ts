@@ -97,7 +97,11 @@ export function computeCrashPoint(
   const hex8 = bytesToHex(h).slice(0, 8);
   const result = parseInt(hex8, 16) >>> 0; // unsigned 32-bit
 
-  if (result % 33 === 0) return 1.0;
+  // Instant-crash case: return the advertised floor (1.01), not 1.0.
+  // The docstring and UI both promise outcomes in [1.01, 100.0]; returning
+  // 1.0 violates the stated minimum and gives players a worse payout than
+  // the published house-edge formula implies.
+  if (result % 33 === 0) return 1.01;
 
   const houseEdge = 0.03;
   const e = 0x100000000;
