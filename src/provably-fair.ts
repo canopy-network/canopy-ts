@@ -36,7 +36,15 @@ export function computeHMAC(
 
 /**
  * Computes a dice roll in the range [0, 9999] from the given seeds and nonce.
- * Maps the first 4 bytes of HMAC-SHA256 to a uint32, then takes modulo 10000.
+ *
+ * Uses rejection sampling over successive 4-byte HMAC windows to eliminate
+ * modulo bias. A naive `uint32 % 10000` is biased because 2^32 (4 294 967 296)
+ * is not evenly divisible by 10000 — values 0–7295 appear once more often than
+ * values 7296–9999, giving the house a hidden systematic edge on those outcomes.
+ *
+ * Rejection threshold: 4 294 960 000 (= floor(2^32 / 10000) * 10000).
+ * Values at or above the threshold are discarded and the next 4-byte window is
+ * tried. In practice fewer than 2 iterations are needed on average.
  */
 export function computeDiceRoll(
   serverSeed: string,
@@ -44,9 +52,16 @@ export function computeDiceRoll(
   nonce: number
 ): number {
   const h = computeHMAC(serverSeed, clientSeed, nonce);
-  const view = new DataView(h.buffer, h.byteOffset, h.byteLength);
-  const raw = view.getUint32(0, false); // big-endian
-  return raw % 10000;
+  const RANGE = 10000;
+  const THRESHOLD = Math.floor(0x100000000 / RANGE) * RANGE; // 4_294_960_000
+  for (let offset = 0; offset + 4 <= h.length; offset += 4) {
+    const view = new DataView(h.buffer, h.byteOffset + offset, 4);
+    const raw = view.getUint32(0, false); // big-endian
+    if (raw < THRESHOLD) return raw % RANGE;
+  }
+  // Fallback (astronomically unlikely): use modulo on last window
+  const view = new DataView(h.buffer, h.byteOffset, 4);
+  return view.getUint32(0, false) % RANGE;
 }
 
 /**
