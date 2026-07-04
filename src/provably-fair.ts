@@ -78,14 +78,22 @@ export function verifyDiceRoll(
 
 /**
  * Computes the crash point for a rocket round.
- * Uses HMAC-SHA256(serverSeed, nonce) with 3% house edge.
+ * Uses HMAC-SHA256(serverSeed, clientSeed:nonce) with 3% house edge.
  * Result is clamped to [1.01, 100.0].
+ *
+ * @param clientSeed - Player-supplied seed that contributes entropy to the outcome.
+ *   Must not be empty: passing "" removes the client's ability to independently
+ *   influence and verify the result, breaking the provably-fair guarantee.
  */
 export function computeCrashPoint(
   serverSeed: string,
+  clientSeed: string,
   nonce: number
 ): number {
-  const h = computeHMAC(serverSeed, "", nonce);
+  if (!clientSeed) {
+    throw new Error("clientSeed must not be empty — an empty client seed removes player entropy from the provably-fair computation");
+  }
+  const h = computeHMAC(serverSeed, clientSeed, nonce);
   const hex8 = bytesToHex(h).slice(0, 8);
   const result = parseInt(hex8, 16) >>> 0; // unsigned 32-bit
 
