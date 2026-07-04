@@ -26,9 +26,12 @@ export function importFromGoKeystore(
   const curveType = detectPublicKeyCurve(entry.publicKey);
 
   const derivedAddress = deriveAddress(entry.publicKey, curveType);
+  // Throw instead of warn: a mismatch means the entry is tampered or corrupted.
+  // Silently importing the wrong address would cause funds to be sent to the
+  // wrong destination or transactions to be rejected by the network.
   if (derivedAddress.toLowerCase() !== entry.keyAddress.toLowerCase()) {
-    console.warn(
-      `Address mismatch: expected ${entry.keyAddress}, derived ${derivedAddress}`
+    throw new Error(
+      `Keystore integrity check failed: stored address ${entry.keyAddress} does not match address derived from public key ${derivedAddress}. The keystore entry may be corrupted or tampered.`
     );
   }
 
