@@ -1,6 +1,13 @@
 import protobuf from "protobufjs";
 import { hexToBytes } from "@noble/hashes/utils.js";
 
+function assertUint64Field(name: string, value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
 function shouldOmit(value: any): boolean {
   if (value === undefined || value === null) return true;
   if (typeof value === "string" && value === "") return true;
@@ -74,7 +81,7 @@ const MESSAGE_REGISTRY: Record<
         MsgSend.create({
           from_address: hexToBytes(msg.fromAddress),
           to_address: hexToBytes(msg.toAddress),
-          amount: msg.amount,
+          amount: assertUint64Field("amount", msg.amount),
         })
       ).finish(),
   },
