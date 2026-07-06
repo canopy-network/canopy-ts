@@ -4,11 +4,39 @@ import { keccak_256 } from "@noble/hashes/sha3.js";
 import { hexToBytes, bytesToHex } from "@noble/hashes/utils.js";
 import { CurveType, KEY_SIZES } from "./types.js";
 
+function assertPublicKeySize(curveType: CurveType, length: number): void {
+  switch (curveType) {
+    case CurveType.ED25519:
+      if (length !== KEY_SIZES.PUBLIC.ED25519) {
+        throw new Error(`Invalid ED25519 public key size: ${length}`);
+      }
+      return;
+    case CurveType.BLS12381:
+      if (length !== KEY_SIZES.PUBLIC.BLS12381) {
+        throw new Error(`Invalid BLS12381 public key size: ${length}`);
+      }
+      return;
+    case CurveType.SECP256K1:
+      if (length !== KEY_SIZES.PUBLIC.SECP256K1) {
+        throw new Error(`Invalid SECP256K1 public key size: ${length}`);
+      }
+      return;
+    case CurveType.ETHSECP256K1:
+      if (length !== KEY_SIZES.PUBLIC.ETHSECP256K1 && length !== 65) {
+        throw new Error(`Invalid ETHSECP256K1 public key size: ${length}`);
+      }
+      return;
+    default:
+      return;
+  }
+}
+
 export function deriveAddress(
   publicKeyHex: string,
   curveType: CurveType
 ): string {
   const pubKeyBytes = hexToBytes(publicKeyHex);
+  assertPublicKeySize(curveType, pubKeyBytes.length);
 
   switch (curveType) {
     case CurveType.ED25519: {
