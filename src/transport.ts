@@ -216,6 +216,7 @@ export class PortalTransport implements GameTransport {
 
   connect(): void {
     this.listener = (event: MessageEvent) => {
+      if (this.parentOrigin !== "*" && event.origin !== this.parentOrigin) return;
       const data = event.data;
       if (!data || typeof data.type !== "string") return;
 
