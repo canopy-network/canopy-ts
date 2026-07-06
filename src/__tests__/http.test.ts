@@ -107,6 +107,23 @@ describe("request", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("does not fetch when the caller signal is already aborted", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    const reason = new Error("cancelled");
+    controller.abort(reason);
+
+    const err = await request(
+      "op",
+      "/p",
+      { method: "GET" },
+      { signal: controller.signal, retry: false },
+    ).catch((e) => e);
+    expect(err).toBe(reason);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("throws TimeoutError when the request exceeds timeoutMs", async () => {
     // fetch that rejects with an abort-style error when its signal aborts
     const fetchMock = vi.fn().mockImplementation((_url, init: RequestInit) => {

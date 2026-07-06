@@ -98,6 +98,11 @@ export async function request(
     // Abort if either the caller's signal or our timeout fires.
     const onCallerAbort = () => timeoutController.abort(opts.signal?.reason);
     opts.signal?.addEventListener("abort", onCallerAbort, { once: true });
+    if (opts.signal?.aborted) {
+      clearTimeout(timer);
+      opts.signal.removeEventListener("abort", onCallerAbort);
+      throw opts.signal.reason;
+    }
 
     let res: Response;
     try {
