@@ -21,7 +21,7 @@ const KeystoreResponseSchema = z.object({
   nicknameMap: z.record(z.string(), z.string()).optional(),
 });
 
-const HeightResponseSchema = z.object({ height: z.number() });
+const HeightResponseSchema = z.object({ height: z.number().int().nonnegative() });
 
 /** Validate a parsed JSON body against a schema, throwing ResponseValidationError on mismatch. */
 function validate<T>(label: string, schema: z.ZodType<T>, value: unknown): T {

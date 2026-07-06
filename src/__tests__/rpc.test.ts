@@ -32,6 +32,16 @@ describe("fetchHeight", () => {
     expect(err).toBeInstanceOf(ResponseValidationError);
     expect(err.value).toEqual({ height: "not-a-number" });
   });
+
+  it("throws ResponseValidationError when height is fractional or negative", async () => {
+    for (const height of [1.5, -1]) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json({ height })));
+      const err = await fetchHeight({ retry: false }).catch((e) => e);
+      expect(err).toBeInstanceOf(ResponseValidationError);
+      expect(err.value).toEqual({ height });
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("submitTx", () => {
