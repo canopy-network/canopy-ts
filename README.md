@@ -75,10 +75,24 @@ const unlocked = await wallet.unlock(accounts[0].address, "password");
 ### RPC queries
 
 ```ts
-import { fetchHeight } from "@canopynetwork/canopy-ts/rpc";
+import { fetchHeight, getBalance } from "@canopynetwork/canopy-ts/rpc";
 
-const height = await fetchHeight({ baseUrl: "https://node.example.com" });
+const baseUrl = "https://node.example.com";
+
+const height = await fetchHeight({ baseUrl });
+const balance = await getBalance(address, { baseUrl });
 ```
+
+`getBalance` returns a validated `number` — use `account()` when you need the
+full record. Both accept a `height` to read a past block:
+
+```ts
+const balanceAt1000 = await getBalance(address, { baseUrl, height: 1000 });
+```
+
+Every public function in `./rpc` carries JSDoc with parameter docs and an
+inline example, so your editor can answer most questions without a trip to
+these docs.
 
 List endpoints (`validators`, `committee`, `orders`, `txsByHeight`,
 `eventsByAddress`, ...) are async generators — `for await...of` the whole
@@ -143,12 +157,19 @@ Every error the SDK throws extends `CanopyError`, so you can catch broadly
 or narrow to a specific failure mode:
 
 ```ts
-import { CanopyError, RpcError, TimeoutError } from "@canopynetwork/canopy-ts/errors";
+import {
+  CanopyError,
+  RpcError,
+  TimeoutError,
+  ValidationError,
+} from "@canopynetwork/canopy-ts/errors";
 
 try {
-  await fetchHeight({ baseUrl });
+  await getBalance(address, { baseUrl });
 } catch (e) {
-  if (e instanceof TimeoutError) {
+  if (e instanceof ValidationError) {
+    // bad argument — e.value holds the offending input; no request was sent
+  } else if (e instanceof TimeoutError) {
     // e.timeoutMs
   } else if (e instanceof RpcError) {
     // e.status, e.requestId, e.body
@@ -157,6 +178,9 @@ try {
   }
 }
 ```
+
+`ValidationError` is raised before any network call, so receiving one means
+the request never left the process.
 
 RPC calls retry transient failures (network errors, 5xx) with exponential
 backoff and jitter by default (3 attempts). Disable per-call with

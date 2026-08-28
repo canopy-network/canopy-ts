@@ -17,6 +17,37 @@ export class CanopyError extends Error {
 }
 
 /**
+ * An argument passed to an SDK function is malformed — a badly-shaped
+ * address, a hash of the wrong length, an out-of-range height, and so on.
+ *
+ * Thrown before any network call is made, so receiving one means the request
+ * never left the process.
+ *
+ * @example
+ * ```ts
+ * import { getBalance } from "@canopynetwork/canopy-ts/rpc";
+ * import { ValidationError } from "@canopynetwork/canopy-ts/errors";
+ *
+ * try {
+ *   await getBalance("not-an-address");
+ * } catch (e) {
+ *   if (e instanceof ValidationError) {
+ *     console.error(e.message, e.value); // the offending input
+ *   }
+ * }
+ * ```
+ */
+export class ValidationError extends CanopyError {
+  /** The offending argument value, for logging and debugging. */
+  readonly value: unknown;
+
+  constructor(message: string, options?: { value?: unknown; cause?: unknown }) {
+    super(message, { cause: options?.cause });
+    this.value = options?.value;
+  }
+}
+
+/**
  * An RPC call reached the server but it returned a non-2xx response, or the
  * request failed at the network layer after exhausting retries.
  */

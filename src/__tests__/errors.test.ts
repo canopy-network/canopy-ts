@@ -5,6 +5,7 @@ import {
   TimeoutError,
   ResponseValidationError,
   TransportError,
+  ValidationError,
 } from "../errors.js";
 
 describe("error hierarchy", () => {
@@ -14,6 +15,7 @@ describe("error hierarchy", () => {
       new TimeoutError("x", { timeoutMs: 1 }),
       new ResponseValidationError("x", { value: null }),
       new TransportError("x"),
+      new ValidationError("x"),
     ]) {
       expect(e).toBeInstanceOf(CanopyError);
       expect(e).toBeInstanceOf(Error);
@@ -23,6 +25,16 @@ describe("error hierarchy", () => {
   it("sets name to the concrete class", () => {
     expect(new RpcError("x").name).toBe("RpcError");
     expect(new TransportError("x").name).toBe("TransportError");
+    expect(new ValidationError("x").name).toBe("ValidationError");
+  });
+
+  it("ValidationError carries the offending value", () => {
+    const e = new ValidationError("bad address", { value: "nope" });
+    expect(e.value).toBe("nope");
+  });
+
+  it("ValidationError's value is optional", () => {
+    expect(new ValidationError("bad").value).toBeUndefined();
   });
 
   it("RpcError carries status, requestId, body", () => {

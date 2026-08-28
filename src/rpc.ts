@@ -1,29 +1,104 @@
 import { z } from "zod";
 import { importFromGoKeystore } from "./keystore.js";
 import type { GoKeystoreEntry, ParsedKeystoreEntry } from "./keystore.js";
-import { ResponseValidationError } from "./errors.js";
+import { ResponseValidationError, ValidationError } from "./errors.js";
 import { request } from "./http.js";
 import type { RequestOptions } from "./http.js";
 
 export type { RequestOptions, RetryConfig } from "./http.js";
 
+// --- Argument validation ----------------------------------------------------
+
+const HEX_RE = /^[0-9a-f]+$/;
+
+/**
+ * Normalize a hex address to the form the node expects: no `0x` prefix,
+ * lowercase.
+ *
+ * @param label - Operation name, used to prefix the error message.
+ * @param address - Hex address, 40 characters, with or without a `0x` prefix.
+ * @returns The address as 40 lowercase hex characters, prefix stripped.
+ * @throws {ValidationError} If `address` is not a 40-character hex string
+ * (optionally `0x`-prefixed).
+ */
+function normalizeAddress(label: string, address: string): string {
+  if (typeof address !== "string" || ![40, 42].includes(address.length)) {
+    throw new ValidationError(`${label}: invalid address format: ${address}`, { value: address });
+  }
+
+  let normalized = address;
+  if (normalized.startsWith("0x") || normalized.startsWith("0X")) {
+    normalized = normalized.slice(2);
+  }
+  normalized = normalized.toLowerCase();
+
+  if (normalized.length !== 40 || !HEX_RE.test(normalized)) {
+    throw new ValidationError(`${label}: invalid address format: ${address}`, { value: address });
+  }
+  return normalized;
+}
+
+/**
+ * Normalize a 64-character block or transaction hash to lowercase hex.
+ *
+ * @param label - Operation name, used to prefix the error message.
+ * @param what - Noun describing the hash, e.g. `"block hash"`.
+ * @param hash - Hash as 64 hex characters.
+ * @returns The hash as 64 lowercase hex characters.
+ * @throws {ValidationError} If `hash` is not a 64-character hex string.
+ */
+function normalizeHash(label: string, what: string, hash: string): string {
+  const normalized = typeof hash === "string" ? hash.toLowerCase() : hash;
+  if (typeof normalized !== "string" || normalized.length !== 64 || !HEX_RE.test(normalized)) {
+    throw new ValidationError(`${label}: invalid ${what} format: ${hash}`, { value: hash });
+  }
+  return normalized;
+}
+
+/**
+ * Assert that an ID (committee, chain, ...) is a non-negative integer.
+ *
+ * @param label - Operation name, used to prefix the error message.
+ * @param what - Noun describing the ID, e.g. `"committee ID"`.
+ * @param id - The value to check.
+ * @throws {ValidationError} If `id` is not a non-negative number.
+ */
+function assertId(label: string, what: string, id: number): void {
+  if (typeof id !== "number" || Number.isNaN(id) || id < 0) {
+    throw new ValidationError(`${label}: invalid ${what}: ${id}`, { value: id });
+  }
+}
+
 // --- PageParams for paginated endpoints ------------------------------------
 
+/** Options accepted by {@link PageParams} and by every paginated query's `pageParams`. */
 export interface PageParamsOptions {
+  /** Page number, 1-indexed. Default 1. */
   page?: number;
+  /** Results per page. Default 20 (the node caps this at 100). */
   per_page?: number;
+  /** Field name to sort by. Endpoint-specific; omitted when unset. */
   order_by?: string;
+  /** Sort descending. Default true. */
   desc?: boolean;
 }
 
 /**
  * Pagination parameters for list endpoints.
  *
- * Attributes:
- *   page - Page number (1-indexed, default: 1)
- *   per_page - Results per page (default: 20, max: 100)
- *   order_by - Sort field name
- *   desc - Sort descending (default: true)
+ * Most consumers never need this — the paginated query functions
+ * ({@link validators}, {@link txsByHeight}, ...) are async generators that
+ * walk every page for you and take a plain {@link PageParamsOptions} object.
+ * Construct a `PageParams` directly only when calling {@link postQuery}
+ * against a paginated endpoint yourself.
+ *
+ * @example
+ * ```ts
+ * import { PageParams, postQuery } from "@canopynetwork/canopy-ts/rpc";
+ *
+ * const page = new PageParams({ page: 2, per_page: 50, order_by: "height" });
+ * const raw = await postQuery("validators", "/v1/query/validators", page.toDict());
+ * ```
  */
 export class PageParams {
   page: number;
@@ -39,10 +114,15 @@ export class PageParams {
   }
 
   /**
-   * Convert to API request parameters.
+   * Convert to the wire-format parameters the node's list endpoints expect.
    *
-   * Returns:
-   *   Dict with pageNumber, perPage, orderBy (if set), desc
+   * @returns An object with `pageNumber`, `perPage`, `desc`, and `orderBy`
+   * (only when {@link PageParams.order_by} is set).
+   * @example
+   * ```ts
+   * new PageParams({ page: 2, per_page: 50 }).toDict();
+   * // { pageNumber: 2, perPage: 50, desc: true }
+   * ```
    */
   toDict(): Record<string, any> {
     const params: Record<string, any> = {
@@ -76,13 +156,25 @@ const KeystoreResponseSchema = z.object({
 const HeightResponseSchema = z.object({ height: z.number() });
 
 /**
- * Create a schema for paginated responses.
+ * Build a Zod schema for one page of a paginated response.
  *
- * Args:
- *   itemSchema - Schema for individual items in the results array
+ * Validates the `results` array against `itemSchema` and passes through the
+ * surrounding pagination envelope (`pageNumber`, `perPage`, `desc`, `total`,
+ * `pages`, ...) untouched.
  *
- * Returns:
- *   Zod schema accepting { results: [...], pageNumber, perPage, desc, total, pages, ... }
+ * @param itemSchema - Schema for a single item in the `results` array.
+ * @returns A schema accepting `{ results: T[], ...pagination fields }`.
+ * @example
+ * ```ts
+ * import { z } from "zod";
+ * import { PageSchema, postQuery } from "@canopynetwork/canopy-ts/rpc";
+ *
+ * const Validators = PageSchema(z.object({ address: z.string() }));
+ * const page = await postQuery(
+ *   "validators", "/v1/query/validators", { pageNumber: 1, perPage: 20 }, {}, Validators,
+ * );
+ * page.results[0].address; // string
+ * ```
  */
 export function PageSchema<T>(itemSchema: z.ZodType<T>): z.ZodType<{ results: T[]; [key: string]: any }> {
   return z.object({
@@ -137,21 +229,31 @@ function validate<T>(label: string, schema: z.ZodType<T>, value: unknown): T {
 }
 
 /**
- * Generic POST query helper for read-only RPC endpoints.
+ * Generic POST helper for read-only RPC endpoints — the escape hatch for
+ * querying an endpoint this module does not yet wrap.
  *
- * Args:
- *   label - Human-readable operation name for error messages
- *   path - RPC endpoint path (e.g., "/v1/query/account")
- *   body - Request body object (will be JSON-stringified)
- *   opts - Request options (baseUrl, retry, timeout, etc.)
- *   schema - Optional Zod schema for response validation
+ * @param label - Human-readable operation name, used in error messages.
+ * @param path - RPC endpoint path, e.g. `"/v1/query/account"`.
+ * @param body - Request body; JSON-stringified before sending.
+ * @param opts - Request options (`baseUrl`, `timeoutMs`, `retry`, `signal`).
+ * @param schema - Optional Zod schema; when given, the response is validated
+ * and the return type is narrowed to the schema's output.
+ * @returns The parsed JSON response, validated against `schema` if provided.
+ * @throws {ResponseValidationError} If `schema` is given and the response does
+ * not match it.
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @throws {TimeoutError} If the request exceeds `opts.timeoutMs`.
+ * @example
+ * ```ts
+ * import { z } from "zod";
+ * import { postQuery } from "@canopynetwork/canopy-ts/rpc";
  *
- * Returns:
- *   Parsed JSON response, optionally validated against schema
- *
- * Throws:
- *   ResponseValidationError if response does not match schema
- *   RpcError on HTTP errors or network failures
+ * const { height } = await postQuery(
+ *   "height", "/v1/query/height", {},
+ *   { baseUrl: "https://node.example.com" },
+ *   z.object({ height: z.number() }),
+ * );
+ * ```
  */
 export async function postQuery<T = unknown>(
   label: string,
@@ -176,8 +278,23 @@ export async function postQuery<T = unknown>(
 // --- RPC helpers ------------------------------------------------------------
 
 /**
- * Fetch all keystore entries from the Canopy admin RPC.
- * Calls GET /v1/admin/keystore (default port 50003).
+ * Fetch every keystore entry from the Canopy admin RPC.
+ *
+ * Calls `GET /v1/admin/keystore` (default port 50003). Each entry's
+ * `keyAddress` is backfilled from its map key when the node omits it.
+ *
+ * @param opts - Request options (`baseUrl`, `timeoutMs`, `retry`, `signal`).
+ * @returns One parsed entry per address in the node's keystore; an empty array
+ * if the keystore has no entries.
+ * @throws {ResponseValidationError} If the response is not a keystore payload.
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @example
+ * ```ts
+ * import { fetchKeystore } from "@canopynetwork/canopy-ts/rpc";
+ *
+ * const entries = await fetchKeystore({ baseUrl: "http://localhost:50003" });
+ * for (const entry of entries) console.log(entry.keyAddress, entry.keyNickname);
+ * ```
  */
 export async function fetchKeystore(
   opts: RequestOptions = {},
@@ -196,8 +313,22 @@ export async function fetchKeystore(
 }
 
 /**
- * Fetch the current block height from the Canopy public RPC.
- * Calls POST /v1/query/height (default port 50002).
+ * Fetch the chain's latest committed block height.
+ *
+ * Calls `POST /v1/query/height` (default port 50002). This is the value to
+ * pass as a transaction's `height` when building one.
+ *
+ * @param opts - Request options (`baseUrl`, `timeoutMs`, `retry`, `signal`).
+ * @returns The latest committed block height.
+ * @throws {ResponseValidationError} If the response has no numeric `height`.
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @example
+ * ```ts
+ * import { fetchHeight } from "@canopynetwork/canopy-ts/rpc";
+ *
+ * const height = await fetchHeight({ baseUrl: "https://node.example.com" });
+ * console.log(`chain is at block ${height}`);
+ * ```
  */
 export async function fetchHeight(opts: RequestOptions = {}): Promise<number> {
   const res = await request(
@@ -212,9 +343,29 @@ export async function fetchHeight(opts: RequestOptions = {}): Promise<number> {
 
 /**
  * Submit a signed transaction to the Canopy public RPC.
- * Calls POST /v1/tx (default port 50002).
  *
- * Returns the response body containing the transaction hash and other metadata.
+ * Calls `POST /v1/tx` (default port 50002). A 2xx response means the node
+ * accepted the transaction into its mempool — not that it has been committed;
+ * poll {@link txByHash} to confirm inclusion in a block.
+ *
+ * @param tx - A signed transaction, as built by `createAndSignTransaction`.
+ * @param opts - Request options (`baseUrl`, `timeoutMs`, `retry`, `signal`).
+ * @returns The node's response body. Most nodes return the transaction hash as
+ * a bare JSON string; some wrap it as `{ txHash }` or `{ hash }`.
+ * @throws {RpcError} On a non-2xx response (e.g. a rejected transaction, whose
+ * reason is on `RpcError.body`) or a network failure.
+ * @example
+ * ```ts
+ * import { submitTx } from "@canopynetwork/canopy-ts/rpc";
+ * import { RpcError } from "@canopynetwork/canopy-ts/errors";
+ *
+ * try {
+ *   const res = await submitTx(signedTx, { baseUrl: "https://node.example.com" });
+ *   console.log("submitted:", res);
+ * } catch (e) {
+ *   if (e instanceof RpcError) console.error("rejected:", e.body);
+ * }
+ * ```
  */
 export async function submitTx(tx: object, opts: RequestOptions = {}): Promise<Record<string, unknown>> {
   const res = await request(
@@ -229,33 +380,33 @@ export async function submitTx(tx: object, opts: RequestOptions = {}): Promise<R
 // --- Query methods ----------------------------------------------------------
 
 /**
- * Get account balance and details.
+ * Get an account's full on-chain record.
  *
- * Args:
- *   address: Hex address (40 characters, with or without 0x prefix)
- *   opts: Request options including optional height parameter (0 = latest)
+ * For just the spendable balance, prefer {@link getBalance} — it returns a
+ * validated `number` instead of an untyped record.
  *
- * Returns:
- *   Dict with address, balance, staked, height, and other account data
+ * @param address - Hex address, 40 characters, with or without a `0x` prefix.
+ * @param opts - Request options, plus `height` to query a historical block
+ * (`0`, the default, means the latest committed height).
+ * @returns The account record: `address`, `amount` (spendable balance), and
+ * any further fields the node reports.
+ * @throws {ValidationError} If `address` is not a 40-character hex string.
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @example
+ * ```ts
+ * import { account } from "@canopynetwork/canopy-ts/rpc";
  *
- * Throws:
- *   ValueError: If address format is invalid
- *   RpcError: On HTTP errors or network failures
+ * const acct = await account("3db4b1ec0d9206365696e0c3a52a519840060c86", {
+ *   baseUrl: "https://node.example.com",
+ * });
+ * console.log(acct.amount);
+ * ```
  */
 export async function account(
   address: string,
   opts: RequestOptions & { height?: number } = {},
 ): Promise<Record<string, any>> {
-  if (typeof address !== "string" || ![40, 42].includes(address.length)) {
-    throw new Error(`Invalid address format: ${address}`);
-  }
-
-  let normalizedAddr = address;
-  if (normalizedAddr.startsWith("0x") || normalizedAddr.startsWith("0X")) {
-    normalizedAddr = normalizedAddr.slice(2);
-  }
-  normalizedAddr = normalizedAddr.toLowerCase();
-
+  const normalizedAddr = normalizeAddress("account", address);
   const { height = 0, ...requestOpts } = opts;
 
   return postQuery("account", "/v1/query/account", {
@@ -264,26 +415,89 @@ export async function account(
   }, requestOpts);
 }
 
+/** Response shape validated by {@link getBalance}. */
+const BalanceResponseSchema = z
+  .object({ amount: z.number().optional() })
+  .passthrough();
+
 /**
- * Get block at specific height.
+ * Get an account's spendable balance, as a plain number.
  *
- * Args:
- *   height: Block height (must be > 0)
- *   opts: Request options
+ * A convenience wrapper over {@link account}: it validates the node's reply
+ * and pulls out the balance, so you don't have to reach into an untyped
+ * record to find it. When the account record carries no `amount` field, the
+ * balance is reported as `0`.
  *
- * Returns:
- *   Dict with block data, transactions, and metadata
+ * The value is in the chain's smallest denomination, the same unit a
+ * transaction's `amount` and `fee` use.
  *
- * Throws:
- *   ValueError: If height is 0 or invalid
- *   RpcError: On HTTP errors or network failures
+ * Note that how a node answers for an address it has no record of is the
+ * node's choice: it may return an empty account record, in which case this
+ * returns `0`, or reject the query, in which case the {@link RpcError}
+ * propagates. Catch `RpcError` if you need to treat both as "no balance".
+ *
+ * @param address - Hex address, 40 characters, with or without a `0x` prefix.
+ * @param opts - Request options, plus `height` to query a historical block
+ * (`0`, the default, means the latest committed height).
+ * @returns The spendable balance; `0` when the account record reports no
+ * `amount`.
+ * @throws {ValidationError} If `address` is not a 40-character hex string.
+ * @throws {ResponseValidationError} If the node reports a non-numeric `amount`.
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @example
+ * ```ts
+ * import { getBalance } from "@canopynetwork/canopy-ts/rpc";
+ *
+ * const balance = await getBalance("3db4b1ec0d9206365696e0c3a52a519840060c86", {
+ *   baseUrl: "https://node.example.com",
+ * });
+ * if (balance === 0) console.log("account is empty");
+ *
+ * // balance at a past height
+ * const past = await getBalance(address, { baseUrl, height: 1000 });
+ * ```
+ */
+export async function getBalance(
+  address: string,
+  opts: RequestOptions & { height?: number } = {},
+): Promise<number> {
+  const normalizedAddr = normalizeAddress("getBalance", address);
+  const { height = 0, ...requestOpts } = opts;
+
+  const data = await postQuery(
+    "getBalance",
+    "/v1/query/account",
+    { address: normalizedAddr, height },
+    requestOpts,
+    BalanceResponseSchema,
+  );
+  return data.amount ?? 0;
+}
+
+/**
+ * Get the block committed at a specific height.
+ *
+ * @param height - Block height. Must be greater than 0; unlike the query
+ * endpoints that take an `opts.height`, `0` is not a "latest" sentinel here.
+ * Pair with {@link fetchHeight} to fetch the newest block.
+ * @param opts - Request options (`baseUrl`, `timeoutMs`, `retry`, `signal`).
+ * @returns The block: header, transactions, and metadata.
+ * @throws {ValidationError} If `height` is not a number greater than 0.
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @example
+ * ```ts
+ * import { fetchHeight, blockByHeight } from "@canopynetwork/canopy-ts/rpc";
+ *
+ * const opts = { baseUrl: "https://node.example.com" };
+ * const latest = await blockByHeight(await fetchHeight(opts), opts);
+ * ```
  */
 export async function blockByHeight(
   height: number,
   opts: RequestOptions = {},
 ): Promise<Record<string, any>> {
-  if (typeof height !== "number" || height <= 0) {
-    throw new Error("Height must be greater than 0");
+  if (typeof height !== "number" || Number.isNaN(height) || height <= 0) {
+    throw new ValidationError("blockByHeight: height must be greater than 0", { value: height });
   }
 
   return postQuery("blockByHeight", "/v1/query/block-by-height", {
@@ -292,91 +506,99 @@ export async function blockByHeight(
 }
 
 /**
- * Get block by hash.
+ * Get a block by its hash.
  *
- * Args:
- *   blockHash: Block hash (64 character hex)
- *   opts: Request options
+ * @param blockHash - Block hash, 64 hex characters.
+ * @param opts - Request options (`baseUrl`, `timeoutMs`, `retry`, `signal`).
+ * @returns The block: header, transactions, and metadata.
+ * @throws {ValidationError} If `blockHash` is not a 64-character hex string.
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @example
+ * ```ts
+ * import { blockByHash } from "@canopynetwork/canopy-ts/rpc";
  *
- * Returns:
- *   Dict with block data
- *
- * Throws:
- *   ValueError: If hash format is invalid
- *   RpcError: On HTTP errors or network failures
+ * const block = await blockByHash(hash, { baseUrl: "https://node.example.com" });
+ * ```
  */
 export async function blockByHash(
   blockHash: string,
   opts: RequestOptions = {},
 ): Promise<Record<string, any>> {
-  if (typeof blockHash !== "string" || blockHash.length !== 64) {
-    throw new Error(`Invalid block hash format: ${blockHash}`);
-  }
+  const hash = normalizeHash("blockByHash", "block hash", blockHash);
 
   return postQuery("blockByHash", "/v1/query/block-by-hash", {
-    hash: blockHash,
+    hash,
   }, opts);
 }
 
 /**
- * Get transaction by hash.
+ * Get a committed transaction by its hash.
  *
- * Args:
- *   txHash: Transaction hash (64 character hex)
- *   opts: Request options
+ * Only finds transactions already included in a block — a just-submitted
+ * transaction still in the mempool is not returned (the node replies 404,
+ * surfaced as an {@link RpcError} with `status` 404). Poll this to confirm
+ * that a {@link submitTx} call landed on chain.
  *
- * Returns:
- *   Dict with transaction data
+ * @param txHash - Transaction hash, 64 hex characters.
+ * @param opts - Request options (`baseUrl`, `timeoutMs`, `retry`, `signal`).
+ * @returns The transaction, with its height and result.
+ * @throws {ValidationError} If `txHash` is not a 64-character hex string.
+ * @throws {RpcError} On a non-2xx response (404 while still pending) or a
+ * network failure.
+ * @example
+ * ```ts
+ * import { txByHash } from "@canopynetwork/canopy-ts/rpc";
+ * import { RpcError } from "@canopynetwork/canopy-ts/errors";
  *
- * Throws:
- *   ValueError: If hash format is invalid
- *   RpcError: On HTTP errors or network failures
+ * try {
+ *   const tx = await txByHash(hash, { baseUrl: "https://node.example.com" });
+ *   console.log("committed at height", tx.height);
+ * } catch (e) {
+ *   if (e instanceof RpcError && e.status === 404) console.log("still pending");
+ * }
+ * ```
  */
 export async function txByHash(
   txHash: string,
   opts: RequestOptions = {},
 ): Promise<Record<string, any>> {
-  if (typeof txHash !== "string" || txHash.length !== 64) {
-    throw new Error(`Invalid transaction hash format: ${txHash}`);
-  }
+  const hash = normalizeHash("txByHash", "transaction hash", txHash);
 
   return postQuery("txByHash", "/v1/query/tx-by-hash", {
-    hash: txHash,
+    hash,
   }, opts);
 }
 
 /**
- * Get failed mempool transactions for an address.
- *
- * Note: there is no global index of failed transactions because Canopy
- * does not include failed transactions in blocks - this only reflects
- * transactions that failed locally.
- *
- * Iterates every failed transaction for an address, advancing pages
+ * Iterate every failed mempool transaction for an address, advancing pages
  * automatically.
  *
- * Args:
- *   address: Hex address of the sender (40 characters)
- *   opts: Request options plus optional pageParams (page/per_page/order_by/desc)
+ * Scoped to the node you query: Canopy does not include failed transactions
+ * in blocks, so there is no global index — this reflects only what failed
+ * locally on that node.
  *
- * Throws:
- *   ValueError: If address format is invalid
- *   RpcError: On HTTP errors or network failures
+ * @param address - Hex address of the sender, 40 characters, with or without
+ * a `0x` prefix.
+ * @param opts - Request options, plus `pageParams` to tune page size and sort
+ * order (`{ page, per_page, order_by, desc }`).
+ * @returns An async generator over the failed transactions.
+ * @throws {ValidationError} If `address` is not a 40-character hex string.
+ * @throws {RpcError} On a non-2xx response or a network failure, raised while
+ * iterating.
+ * @example
+ * ```ts
+ * import { failedTxs } from "@canopynetwork/canopy-ts/rpc";
+ *
+ * for await (const tx of failedTxs(address, { baseUrl })) {
+ *   console.error("failed:", tx);
+ * }
+ * ```
  */
 export async function* failedTxs(
   address: string,
   opts: RequestOptions & { pageParams?: PageParamsOptions } = {},
 ): AsyncGenerator<Record<string, any>, void, undefined> {
-  if (typeof address !== "string" || ![40, 42].includes(address.length)) {
-    throw new Error(`Invalid address format: ${address}`);
-  }
-
-  let normalizedAddr = address;
-  if (normalizedAddr.startsWith("0x") || normalizedAddr.startsWith("0X")) {
-    normalizedAddr = normalizedAddr.slice(2);
-  }
-  normalizedAddr = normalizedAddr.toLowerCase();
-
+  const normalizedAddr = normalizeAddress("failedTxs", address);
   const { pageParams, ...requestOpts } = opts;
   yield* paginateQuery(
     (params) => postQuery("failedTxs", "/v1/query/failed-txs", {
@@ -388,15 +610,23 @@ export async function* failedTxs(
 }
 
 /**
- * Iterates every transaction at a specific block height, advancing pages
- * automatically.
+ * Iterate every transaction in a block, advancing pages automatically.
  *
- * Args:
- *   height: Block height (0 = latest committed height)
- *   opts: Request options plus optional pageParams (page/per_page/order_by/desc)
+ * @param height - Block height. `0` (the default) means the latest committed
+ * height.
+ * @param opts - Request options, plus `pageParams` to tune page size and sort
+ * order (`{ page, per_page, order_by, desc }`).
+ * @returns An async generator over the block's transactions.
+ * @throws {RpcError} On a non-2xx response or a network failure, raised while
+ * iterating.
+ * @example
+ * ```ts
+ * import { txsByHeight } from "@canopynetwork/canopy-ts/rpc";
  *
- * Throws:
- *   RpcError: On HTTP errors or network failures
+ * for await (const tx of txsByHeight(0, { baseUrl })) {
+ *   console.log(tx);
+ * }
+ * ```
  */
 export async function* txsByHeight(
   height: number = 0,
@@ -413,31 +643,33 @@ export async function* txsByHeight(
 }
 
 /**
- * Iterates every transaction sent by an address, advancing pages
+ * Iterate every transaction sent by an address, advancing pages
  * automatically.
  *
- * Args:
- *   address: Hex address of the sender (40 characters)
- *   opts: Request options plus optional pageParams (page/per_page/order_by/desc)
+ * @param address - Hex address of the sender, 40 characters, with or without
+ * a `0x` prefix.
+ * @param opts - Request options, plus `pageParams` to tune page size and sort
+ * order (`{ page, per_page, order_by, desc }`).
+ * @returns An async generator over the address's outgoing transactions.
+ * @throws {ValidationError} If `address` is not a 40-character hex string.
+ * @throws {RpcError} On a non-2xx response or a network failure, raised while
+ * iterating.
+ * @example
+ * ```ts
+ * import { txsBySender } from "@canopynetwork/canopy-ts/rpc";
  *
- * Throws:
- *   ValueError: If address format is invalid
- *   RpcError: On HTTP errors or network failures
+ * // newest 50 at a time; break out early once you have what you need
+ * for await (const tx of txsBySender(address, { baseUrl, pageParams: { per_page: 50 } })) {
+ *   console.log(tx);
+ *   break;
+ * }
+ * ```
  */
 export async function* txsBySender(
   address: string,
   opts: RequestOptions & { pageParams?: PageParamsOptions } = {},
 ): AsyncGenerator<Record<string, any>, void, undefined> {
-  if (typeof address !== "string" || ![40, 42].includes(address.length)) {
-    throw new Error(`Invalid address format: ${address}`);
-  }
-
-  let normalizedAddr = address;
-  if (normalizedAddr.startsWith("0x") || normalizedAddr.startsWith("0X")) {
-    normalizedAddr = normalizedAddr.slice(2);
-  }
-  normalizedAddr = normalizedAddr.toLowerCase();
-
+  const normalizedAddr = normalizeAddress("txsBySender", address);
   const { pageParams, ...requestOpts } = opts;
   yield* paginateQuery(
     (params) => postQuery("txsBySender", "/v1/query/txs-by-sender", {
@@ -449,31 +681,31 @@ export async function* txsBySender(
 }
 
 /**
- * Iterates every transaction received by an address, advancing pages
+ * Iterate every transaction received by an address, advancing pages
  * automatically.
  *
- * Args:
- *   address: Hex address of the recipient (40 characters)
- *   opts: Request options plus optional pageParams (page/per_page/order_by/desc)
+ * @param address - Hex address of the recipient, 40 characters, with or
+ * without a `0x` prefix.
+ * @param opts - Request options, plus `pageParams` to tune page size and sort
+ * order (`{ page, per_page, order_by, desc }`).
+ * @returns An async generator over the address's incoming transactions.
+ * @throws {ValidationError} If `address` is not a 40-character hex string.
+ * @throws {RpcError} On a non-2xx response or a network failure, raised while
+ * iterating.
+ * @example
+ * ```ts
+ * import { txsByRecipient } from "@canopynetwork/canopy-ts/rpc";
  *
- * Throws:
- *   ValueError: If address format is invalid
- *   RpcError: On HTTP errors or network failures
+ * for await (const tx of txsByRecipient(address, { baseUrl })) {
+ *   console.log("received:", tx);
+ * }
+ * ```
  */
 export async function* txsByRecipient(
   address: string,
   opts: RequestOptions & { pageParams?: PageParamsOptions } = {},
 ): AsyncGenerator<Record<string, any>, void, undefined> {
-  if (typeof address !== "string" || ![40, 42].includes(address.length)) {
-    throw new Error(`Invalid address format: ${address}`);
-  }
-
-  let normalizedAddr = address;
-  if (normalizedAddr.startsWith("0x") || normalizedAddr.startsWith("0X")) {
-    normalizedAddr = normalizedAddr.slice(2);
-  }
-  normalizedAddr = normalizedAddr.toLowerCase();
-
+  const normalizedAddr = normalizeAddress("txsByRecipient", address);
   const { pageParams, ...requestOpts } = opts;
   yield* paginateQuery(
     (params) => postQuery("txsByRecipient", "/v1/query/txs-by-rec", {
@@ -485,14 +717,22 @@ export async function* txsByRecipient(
 }
 
 /**
- * Iterates every unconfirmed mempool transaction, advancing pages
- * automatically.
+ * Iterate every unconfirmed transaction in the node's mempool, advancing
+ * pages automatically.
  *
- * Args:
- *   opts: Request options plus optional pageParams (page/per_page/order_by/desc)
+ * @param opts - Request options, plus `pageParams` to tune page size and sort
+ * order (`{ page, per_page, order_by, desc }`).
+ * @returns An async generator over the pending transactions.
+ * @throws {RpcError} On a non-2xx response or a network failure, raised while
+ * iterating.
+ * @example
+ * ```ts
+ * import { pending } from "@canopynetwork/canopy-ts/rpc";
  *
- * Throws:
- *   RpcError: On HTTP errors or network failures
+ * for await (const tx of pending({ baseUrl })) {
+ *   console.log("awaiting inclusion:", tx);
+ * }
+ * ```
  */
 export async function* pending(
   opts: RequestOptions & { pageParams?: PageParamsOptions } = {},
@@ -505,23 +745,31 @@ export async function* pending(
 }
 
 /**
- * Look up multiple accounts concurrently in one call.
+ * Look up many accounts concurrently.
  *
- * Runs account(...) for every address concurrently via Promise.all.
- * One address's failure does not abort the others: a failed lookup produces
- * an {address: ..., error: ...} entry in its place rather than throwing.
+ * Issues one {@link account} request per address in parallel. A single
+ * address failing does not abort the rest — that entry carries an `error`
+ * string instead of account data, so this function does not reject on a
+ * per-address failure.
  *
- * Args:
- *   addresses: List of hex addresses (40 characters each)
- *   opts: Request options including optional height parameter (0 = latest)
+ * @param addresses - Hex addresses, 40 characters each, with or without a
+ * `0x` prefix.
+ * @param opts - Request options, plus `height` to query a historical block
+ * (`0`, the default, means the latest committed height).
+ * @returns One entry per input address, in the same order: either the account
+ * record with `address` merged in, or `{ address, error }` if that lookup
+ * failed (including an invalid address, whose {@link ValidationError} is
+ * captured into `error` rather than thrown).
+ * @example
+ * ```ts
+ * import { accountsBatch } from "@canopynetwork/canopy-ts/rpc";
  *
- * Returns:
- *   List of dicts, one per input address, in the same order as addresses.
- *   Each is either account()'s result with "address" merged in, or
- *   {address: <addr>, error: <str>} if that lookup failed.
- *
- * Throws:
- *   RpcError: On HTTP errors or network failures (for the batch itself, not individual addresses)
+ * const results = await accountsBatch([addrA, addrB], { baseUrl });
+ * for (const r of results) {
+ *   if (r.error) console.warn(r.address, "failed:", r.error);
+ *   else console.log(r.address, r.amount);
+ * }
+ * ```
  */
 export async function accountsBatch(
   addresses: string[],
@@ -542,27 +790,27 @@ export async function accountsBatch(
 }
 
 /**
- * Get committee data for a specific chain/committee ID.
+ * Get committee data for one chain/committee.
  *
- * Args:
- *   committeeId: Committee/chain ID
- *   opts: Request options including optional height parameter (0 = latest)
+ * @param committeeId - Committee/chain ID. Must be a non-negative number.
+ * @param opts - Request options, plus `height` to query a historical block
+ * (`0`, the default, means the latest committed height).
+ * @returns The committee's data: last chain height, last root height, and
+ * related fields.
+ * @throws {ValidationError} If `committeeId` is not a non-negative number.
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @example
+ * ```ts
+ * import { committeeData } from "@canopynetwork/canopy-ts/rpc";
  *
- * Returns:
- *   Dict with committee data (last chain height, last root height, etc.)
- *
- * Throws:
- *   ValueError: If committee_id is invalid
- *   RpcError: On HTTP errors or network failures
+ * const data = await committeeData(1, { baseUrl });
+ * ```
  */
 export async function committeeData(
   committeeId: number,
   opts: RequestOptions & { height?: number } = {},
 ): Promise<Record<string, any>> {
-  if (typeof committeeId !== "number" || committeeId < 0) {
-    throw new Error(`Invalid committee ID: ${committeeId}`);
-  }
-
+  assertId("committeeData", "committee ID", committeeId);
   const { height = 0, ...requestOpts } = opts;
 
   return postQuery("committeeData", "/v1/query/committee-data", {
@@ -572,16 +820,18 @@ export async function committeeData(
 }
 
 /**
- * Get committee data for all chains/committees.
+ * Get committee data for every chain/committee at once.
  *
- * Args:
- *   opts: Request options including optional height parameter (0 = latest)
+ * @param opts - Request options, plus `height` to query a historical block
+ * (`0`, the default, means the latest committed height).
+ * @returns Data for all committees.
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @example
+ * ```ts
+ * import { committeesData } from "@canopynetwork/canopy-ts/rpc";
  *
- * Returns:
- *   Dict with all committees' data
- *
- * Throws:
- *   RpcError: On HTTP errors or network failures
+ * const all = await committeesData({ baseUrl });
+ * ```
  */
 export async function committeesData(
   opts: RequestOptions & { height?: number } = {},
@@ -594,16 +844,18 @@ export async function committeesData(
 }
 
 /**
- * Get list of retired committee/chain IDs.
+ * Get the retired committee/chain IDs.
  *
- * Args:
- *   opts: Request options including optional height parameter (0 = latest)
+ * @param opts - Request options, plus `height` to query a historical block
+ * (`0`, the default, means the latest committed height).
+ * @returns The node's retired-committee payload.
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @example
+ * ```ts
+ * import { retiredCommittees } from "@canopynetwork/canopy-ts/rpc";
  *
- * Returns:
- *   List of retired chain IDs
- *
- * Throws:
- *   RpcError: On HTTP errors or network failures
+ * const retired = await retiredCommittees({ baseUrl });
+ * ```
  */
 export async function retiredCommittees(
   opts: RequestOptions & { height?: number } = {},
@@ -616,16 +868,18 @@ export async function retiredCommittees(
 }
 
 /**
- * Get list of chain IDs that receive a portion of the block reward.
+ * Get the chain IDs that receive a share of the block reward.
  *
- * Args:
- *   opts: Request options including optional height parameter (0 = latest)
+ * @param opts - Request options, plus `height` to query a historical block
+ * (`0`, the default, means the latest committed height).
+ * @returns The node's subsidized-committee payload.
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @example
+ * ```ts
+ * import { subsidizedCommittees } from "@canopynetwork/canopy-ts/rpc";
  *
- * Returns:
- *   List of subsidized chain IDs
- *
- * Throws:
- *   RpcError: On HTTP errors or network failures
+ * const subsidized = await subsidizedCommittees({ baseUrl });
+ * ```
  */
 export async function subsidizedCommittees(
   opts: RequestOptions & { height?: number } = {},
@@ -638,30 +892,30 @@ export async function subsidizedCommittees(
 }
 
 /**
- * Iterates every event for an address, advancing pages automatically.
+ * Iterate every chain event involving an address, advancing pages
+ * automatically.
  *
- * Args:
- *   address: Hex address (40 characters)
- *   opts: Request options plus optional pageParams (page/per_page/order_by/desc)
+ * @param address - Hex address, 40 characters, with or without a `0x` prefix.
+ * @param opts - Request options, plus `pageParams` to tune page size and sort
+ * order (`{ page, per_page, order_by, desc }`).
+ * @returns An async generator over the address's events.
+ * @throws {ValidationError} If `address` is not a 40-character hex string.
+ * @throws {RpcError} On a non-2xx response or a network failure, raised while
+ * iterating.
+ * @example
+ * ```ts
+ * import { eventsByAddress } from "@canopynetwork/canopy-ts/rpc";
  *
- * Throws:
- *   ValueError: If address format is invalid
- *   RpcError: On HTTP errors or network failures
+ * for await (const event of eventsByAddress(address, { baseUrl })) {
+ *   console.log(event);
+ * }
+ * ```
  */
 export async function* eventsByAddress(
   address: string,
   opts: RequestOptions & { pageParams?: PageParamsOptions } = {},
 ): AsyncGenerator<Record<string, any>, void, undefined> {
-  if (typeof address !== "string" || ![40, 42].includes(address.length)) {
-    throw new Error(`Invalid address format: ${address}`);
-  }
-
-  let normalizedAddr = address;
-  if (normalizedAddr.startsWith("0x") || normalizedAddr.startsWith("0X")) {
-    normalizedAddr = normalizedAddr.slice(2);
-  }
-  normalizedAddr = normalizedAddr.toLowerCase();
-
+  const normalizedAddr = normalizeAddress("eventsByAddress", address);
   const { pageParams, ...requestOpts } = opts;
   yield* paginateQuery(
     (params) => postQuery("eventsByAddress", "/v1/query/events-by-address", {
@@ -673,25 +927,29 @@ export async function* eventsByAddress(
 }
 
 /**
- * Iterates every event for a chain/committee ID, advancing pages
- * automatically.
+ * Iterate every event for a chain/committee, advancing pages automatically.
  *
- * Args:
- *   chainId: Chain/committee ID
- *   opts: Request options plus optional pageParams (page/per_page/order_by/desc)
+ * @param chainId - Chain/committee ID. Must be a non-negative number.
+ * @param opts - Request options, plus `pageParams` to tune page size and sort
+ * order (`{ page, per_page, order_by, desc }`).
+ * @returns An async generator over the chain's events.
+ * @throws {ValidationError} If `chainId` is not a non-negative number.
+ * @throws {RpcError} On a non-2xx response or a network failure, raised while
+ * iterating.
+ * @example
+ * ```ts
+ * import { eventsByChain } from "@canopynetwork/canopy-ts/rpc";
  *
- * Throws:
- *   ValueError: If chain_id is invalid
- *   RpcError: On HTTP errors or network failures
+ * for await (const event of eventsByChain(1, { baseUrl })) {
+ *   console.log(event);
+ * }
+ * ```
  */
 export async function* eventsByChain(
   chainId: number,
   opts: RequestOptions & { pageParams?: PageParamsOptions } = {},
 ): AsyncGenerator<Record<string, any>, void, undefined> {
-  if (typeof chainId !== "number" || chainId < 0) {
-    throw new Error(`Invalid chain ID: ${chainId}`);
-  }
-
+  assertId("eventsByChain", "chain ID", chainId);
   const { pageParams, ...requestOpts } = opts;
   yield* paginateQuery(
     (params) => postQuery("eventsByChain", "/v1/query/events-by-chain", {
@@ -703,15 +961,24 @@ export async function* eventsByChain(
 }
 
 /**
- * Iterates every event at a specific block height, advancing pages
+ * Iterate every event emitted at a block height, advancing pages
  * automatically.
  *
- * Args:
- *   height: Block height (0 = latest committed height)
- *   opts: Request options plus optional pageParams (page/per_page/order_by/desc)
+ * @param height - Block height. `0` (the default) means the latest committed
+ * height.
+ * @param opts - Request options, plus `pageParams` to tune page size and sort
+ * order (`{ page, per_page, order_by, desc }`).
+ * @returns An async generator over the block's events.
+ * @throws {RpcError} On a non-2xx response or a network failure, raised while
+ * iterating.
+ * @example
+ * ```ts
+ * import { eventsByHeight } from "@canopynetwork/canopy-ts/rpc";
  *
- * Throws:
- *   RpcError: On HTTP errors or network failures
+ * for await (const event of eventsByHeight(0, { baseUrl })) {
+ *   console.log(event);
+ * }
+ * ```
  */
 export async function* eventsByHeight(
   height: number = 0,
@@ -728,33 +995,27 @@ export async function* eventsByHeight(
 }
 
 /**
- * Get validator information.
+ * Get one validator's record.
  *
- * Args:
- *   address: Validator hex address
- *   opts: Request options including optional height parameter (0 = latest)
+ * @param address - Validator's hex address, 40 characters, with or without a
+ * `0x` prefix.
+ * @param opts - Request options, plus `height` to query a historical block
+ * (`0`, the default, means the latest committed height).
+ * @returns The validator record: staked amount, status, and related fields.
+ * @throws {ValidationError} If `address` is not a 40-character hex string.
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @example
+ * ```ts
+ * import { validator } from "@canopynetwork/canopy-ts/rpc";
  *
- * Returns:
- *   Dict with validator details (stake, status, etc.)
- *
- * Throws:
- *   ValueError: If address format is invalid
- *   RpcError: On HTTP errors or network failures
+ * const v = await validator(address, { baseUrl });
+ * ```
  */
 export async function validator(
   address: string,
   opts: RequestOptions & { height?: number } = {},
 ): Promise<Record<string, any>> {
-  if (typeof address !== "string" || ![40, 42].includes(address.length)) {
-    throw new Error(`Invalid address format: ${address}`);
-  }
-
-  let normalizedAddr = address;
-  if (normalizedAddr.startsWith("0x") || normalizedAddr.startsWith("0X")) {
-    normalizedAddr = normalizedAddr.slice(2);
-  }
-  normalizedAddr = normalizedAddr.toLowerCase();
-
+  const normalizedAddr = normalizeAddress("validator", address);
   const { height = 0, ...requestOpts } = opts;
 
   return postQuery("validator", "/v1/query/validator", {
@@ -764,13 +1025,22 @@ export async function validator(
 }
 
 /**
- * Iterates every validator, advancing pages automatically.
+ * Iterate the whole validator set, advancing pages automatically.
  *
- * Args:
- *   opts: Request options plus optional pageParams (page/per_page/order_by/desc) and height
+ * @param opts - Request options, plus `pageParams` to tune page size and sort
+ * order (`{ page, per_page, order_by, desc }`) and `height` to query a
+ * historical block (`0`, the default, means the latest committed height).
+ * @returns An async generator over every validator.
+ * @throws {RpcError} On a non-2xx response or a network failure, raised while
+ * iterating.
+ * @example
+ * ```ts
+ * import { validators } from "@canopynetwork/canopy-ts/rpc";
  *
- * Throws:
- *   RpcError: On HTTP errors or network failures
+ * for await (const v of validators({ baseUrl })) {
+ *   console.log(v);
+ * }
+ * ```
  */
 export async function* validators(
   opts: RequestOptions & { pageParams?: PageParamsOptions; height?: number } = {},
@@ -786,16 +1056,18 @@ export async function* validators(
 }
 
 /**
- * Get token supply information.
+ * Get token supply totals.
  *
- * Args:
- *   opts: Request options including optional height parameter (0 = latest)
+ * @param opts - Request options, plus `height` to query a historical block
+ * (`0`, the default, means the latest committed height).
+ * @returns Supply figures: total, staked, burned, and related fields.
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @example
+ * ```ts
+ * import { supply } from "@canopynetwork/canopy-ts/rpc";
  *
- * Returns:
- *   Dict with total supply, burned, etc.
- *
- * Throws:
- *   RpcError: On HTTP errors or network failures
+ * const totals = await supply({ baseUrl });
+ * ```
  */
 export async function supply(
   opts: RequestOptions & { height?: number } = {},
@@ -808,16 +1080,18 @@ export async function supply(
 }
 
 /**
- * Get network governance parameters.
+ * Get the network's governance parameters.
  *
- * Args:
- *   opts: Request options including optional height parameter (0 = latest)
+ * @param opts - Request options, plus `height` to query a historical block
+ * (`0`, the default, means the latest committed height).
+ * @returns All parameter groups: fee, governance, validator, and consensus.
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @example
+ * ```ts
+ * import { params } from "@canopynetwork/canopy-ts/rpc";
  *
- * Returns:
- *   Dict with fee params, gov params, consensus params, etc.
- *
- * Throws:
- *   RpcError: On HTTP errors or network failures
+ * const all = await params({ baseUrl });
+ * ```
  */
 export async function params(
   opts: RequestOptions & { height?: number } = {},
@@ -830,16 +1104,20 @@ export async function params(
 }
 
 /**
- * Get current network fee parameters.
+ * Get the network's fee parameters — the per-message-type minimum fees to
+ * put on a transaction you are about to build.
  *
- * Args:
- *   opts: Request options including optional height parameter (0 = latest)
+ * @param opts - Request options, plus `height` to query a historical block
+ * (`0`, the default, means the latest committed height).
+ * @returns The fee parameters, keyed per message type (`sendFee`, `stakeFee`,
+ * ...).
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @example
+ * ```ts
+ * import { fees } from "@canopynetwork/canopy-ts/rpc";
  *
- * Returns:
- *   Dict with fee information (min_fee, base_fee, etc.)
- *
- * Throws:
- *   RpcError: On HTTP errors or network failures
+ * const { sendFee } = await fees({ baseUrl });
+ * ```
  */
 export async function fees(
   opts: RequestOptions & { height?: number } = {},
@@ -852,24 +1130,30 @@ export async function fees(
 }
 
 /**
- * Iterates every committee member, advancing pages automatically.
+ * Iterate a committee's members, advancing pages automatically.
  *
- * Args:
- *   committeeId: Committee/chain ID
- *   opts: Request options plus optional pageParams (page/per_page/order_by/desc) and height
+ * @param committeeId - Committee/chain ID. Must be a non-negative number.
+ * @param opts - Request options, plus `pageParams` to tune page size and sort
+ * order (`{ page, per_page, order_by, desc }`) and `height` to query a
+ * historical block (`0`, the default, means the latest committed height).
+ * @returns An async generator over the committee's members.
+ * @throws {ValidationError} If `committeeId` is not a non-negative number.
+ * @throws {RpcError} On a non-2xx response or a network failure, raised while
+ * iterating.
+ * @example
+ * ```ts
+ * import { committee } from "@canopynetwork/canopy-ts/rpc";
  *
- * Throws:
- *   ValueError: If committee_id is invalid
- *   RpcError: On HTTP errors or network failures
+ * for await (const member of committee(1, { baseUrl })) {
+ *   console.log(member);
+ * }
+ * ```
  */
 export async function* committee(
   committeeId: number,
   opts: RequestOptions & { pageParams?: PageParamsOptions; height?: number } = {},
 ): AsyncGenerator<Record<string, any>, void, undefined> {
-  if (typeof committeeId !== "number" || committeeId < 0) {
-    throw new Error(`Invalid committee ID: ${committeeId}`);
-  }
-
+  assertId("committee", "committee ID", committeeId);
   const { pageParams, height = 0, ...requestOpts } = opts;
   yield* paginateQuery(
     (params) => postQuery("committee", "/v1/query/committee", {
@@ -904,19 +1188,28 @@ async function queryPool(
 }
 
 /**
- * Query pool balance(s) for a committee/chain.
+ * Query a committee's pool balance.
  *
- * Args:
- *   chainId: The committee/chain ID
- *   opts: Request options with optional poolType and node targeting
- *         poolType: 'subsidy' (default), 'holding', 'liquidity', 'escrow', or 'all'
+ * A chain has four pools, addressed by adding a fixed offset to the chain ID.
+ * This resolves that arithmetic for you and reports the resulting `pool_id`
+ * on the result.
  *
- * Returns:
- *   Single pool dict with pool_id, or nested dict for 'all' poolType
+ * @param chainId - The committee/chain ID.
+ * @param opts - Request options, plus `poolType`: `"subsidy"` (the default),
+ * `"holding"`, `"liquidity"`, `"escrow"`, or `"all"` to fetch every pool.
+ * @returns One pool's data with its `pool_id` merged in; or, for
+ * `poolType: "all"`, an object keyed by pool name whose values are those
+ * per-pool results.
+ * @throws {ValidationError} If `poolType` is not one of the names above.
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @example
+ * ```ts
+ * import { pool } from "@canopynetwork/canopy-ts/rpc";
  *
- * Throws:
- *   ValueError: If pool_type is invalid
- *   RpcError: On HTTP errors or network failures
+ * const subsidy = await pool(1, { baseUrl });
+ * const every = await pool(1, { baseUrl, poolType: "all" });
+ * console.log(every.escrow.pool_id);
+ * ```
  */
 export async function pool(
   chainId: number,
@@ -935,8 +1228,9 @@ export async function pool(
 
   const addend = POOL_ADDENDS[poolType];
   if (addend === undefined) {
-    throw new Error(
-      `Unknown pool_type '${poolType}'. Valid: ${Object.keys(POOL_ADDENDS).join(", ")}, 'all'`
+    throw new ValidationError(
+      `pool: unknown poolType '${poolType}'. Valid: ${Object.keys(POOL_ADDENDS).join(", ")}, 'all'`,
+      { value: poolType },
     );
   }
 
@@ -953,17 +1247,19 @@ export async function pool(
  * a deposit/withdraw was actually queued, since settlement itself requires a
  * counterpart chain to process the batch.
  *
- * Args:
- *   chainId: The committee/chain ID (same id passed as `committee_id` to
- *            deposit()/withdraw() -- the COUNTER-ASSET chain, not necessarily
- *            the chain being submitted to)
- *   opts: Request options including optional height parameter (0 = latest)
+ * @param chainId - The committee/chain ID — the same id passed as
+ * `committee_id` to deposit/withdraw, i.e. the COUNTER-ASSET chain, not
+ * necessarily the chain being submitted to.
+ * @param opts - Request options, plus `height` to query a historical block
+ * (`0`, the default, means the latest committed height).
+ * @returns The pending DEX batch.
+ * @throws {RpcError} On a non-2xx response or a network failure.
+ * @example
+ * ```ts
+ * import { nextDexBatch } from "@canopynetwork/canopy-ts/rpc";
  *
- * Returns:
- *   Dict with DEX batch data
- *
- * Throws:
- *   RpcError: On HTTP errors or network failures
+ * const batch = await nextDexBatch(1, { baseUrl });
+ * ```
  */
 export async function nextDexBatch(
   chainId: number,
@@ -981,16 +1277,25 @@ export async function nextDexBatch(
  * Iterates every open DEX sell order for a committee, advancing pages
  * automatically.
  *
- * Each result's "id" is the order's hex order ID -- the same value
- * edit_order()/delete_order() expect for their order_id argument.
+ * Each result's `id` is the order's hex order ID — the same value
+ * edit-order/delete-order expect for their `order_id` argument.
  *
- * Args:
- *   committeeId: The committee id the orders belong to (same id passed as
- *                `committee_id` to create_order/edit_order/delete_order)
- *   opts: Request options plus optional pageParams (page/per_page/order_by/desc) and height
+ * @param committeeId - The committee the orders belong to, the same id passed
+ * as `committee_id` to create-order/edit-order/delete-order.
+ * @param opts - Request options, plus `pageParams` to tune page size and sort
+ * order (`{ page, per_page, order_by, desc }`) and `height` to query a
+ * historical block (`0`, the default, means the latest committed height).
+ * @returns An async generator over the committee's open sell orders.
+ * @throws {RpcError} On a non-2xx response or a network failure, raised while
+ * iterating.
+ * @example
+ * ```ts
+ * import { orders } from "@canopynetwork/canopy-ts/rpc";
  *
- * Throws:
- *   RpcError: On HTTP errors or network failures
+ * for await (const order of orders(1, { baseUrl })) {
+ *   console.log(order.id);
+ * }
+ * ```
  */
 export async function* orders(
   committeeId: number,
