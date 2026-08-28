@@ -14,7 +14,8 @@ import { derivePublicKey } from '../../signing.js';
 import { deriveAddress } from '../../address.js';
 import { CurveType } from '../../types.js';
 import { queryHeight, queryAccount, rpcRequest, waitFor, getE2eConfig, extractTxHash } from '../../../tests/e2e/helpers.js';
-import { submitTx } from '../../rpc.js';
+import { submitTx, getBalance, fetchHeight } from '../../rpc.js';
+import { RpcError } from '../../errors.js';
 import { generateKeyPair } from '../../wallet.js';
 import { encryptKeyEntry, decryptEntry } from '../../keystore.js';
 
@@ -56,6 +57,45 @@ describe('E2E Smoke Tests', () => {
     expect(account.address).toBe(DEVNET_ADDRESS);
     expect(typeof account.amount).toBe('number');
     expect((account.amount as number) > 0).toBe(true);
+  });
+
+  it('getBalance returns the genesis account balance as a number', async () => {
+    const balance = await getBalance(DEVNET_ADDRESS, { baseUrl: config.rpcUrl });
+
+    expect(typeof balance).toBe('number');
+    expect(balance).toBeGreaterThan(0);
+
+    // Must agree with the raw account query it wraps.
+    const raw = await queryAccount(DEVNET_ADDRESS, config);
+    expect(balance).toBe(raw.amount);
+  });
+
+  it('getBalance on an unseen address returns 0 or a typed RpcError', async () => {
+    // How a node answers for an address it has no record of is the node's
+    // choice -- an empty account record (0) or a rejection. Both are valid;
+    // what matters is that a rejection arrives as a typed RpcError rather
+    // than leaking as some untyped failure.
+    const unknown = generateKeyPair().address;
+
+    try {
+      expect(await getBalance(unknown, { baseUrl: config.rpcUrl })).toBe(0);
+    } catch (e) {
+      expect(e).toBeInstanceOf(RpcError);
+    }
+  });
+
+  it('getBalance accepts a 0x-prefixed address', async () => {
+    const prefixed = await getBalance(`0x${DEVNET_ADDRESS}`, { baseUrl: config.rpcUrl });
+    const bare = await getBalance(DEVNET_ADDRESS, { baseUrl: config.rpcUrl });
+
+    expect(prefixed).toBe(bare);
+  });
+
+  it('fetchHeight agrees with the raw height query', async () => {
+    const viaSdk = await fetchHeight({ baseUrl: config.rpcUrl });
+
+    expect(typeof viaSdk).toBe('number');
+    expect(viaSdk).toBeGreaterThanOrEqual(1);
   });
 
   it('real signed send is accepted by the node', async () => {

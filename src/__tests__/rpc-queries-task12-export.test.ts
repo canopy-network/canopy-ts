@@ -36,6 +36,11 @@ describe("Task 12: Export wiring and regression", () => {
       expect(typeof account).toBe("function");
     });
 
+    it("exports getBalance convenience helper", async () => {
+      const { getBalance } = await import("../rpc.js");
+      expect(typeof getBalance).toBe("function");
+    });
+
     it("exports blockByHeight query", async () => {
       const { blockByHeight } = await import("../rpc.js");
       expect(typeof blockByHeight).toBe("function");
@@ -219,6 +224,7 @@ describe("Task 12: Export wiring and regression", () => {
         "pool",
         "nextDexBatch",
         "orders",
+        "getBalance",
       ];
 
       const implemented = queryMethods.filter((m) => typeof rpc[m] === "function");

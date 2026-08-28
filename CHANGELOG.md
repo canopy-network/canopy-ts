@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `getBalance(address, opts)` in `./rpc` — returns an account's spendable
+  balance as a validated `number`, instead of making callers dig the `amount`
+  field out of `account()`'s untyped `Record<string, any>`. Accepts the same
+  `height` option as `account()` for historical lookups, and reports `0` when
+  the account record carries no `amount`.
+- `ValidationError` in `./errors` — thrown when an argument is malformed (bad
+  address, wrong-length hash, non-positive height, unknown pool type). It
+  extends `CanopyError` and carries the offending input on `.value`.
+- JSDoc on every public export in `./rpc` — description, `@param`, `@returns`,
+  `@throws`, and a runnable `@example` — so editors surface parameter hints,
+  return types, and usage inline. Previously these were Python-style
+  `Args:`/`Returns:` docstrings, which editors render as one undifferentiated
+  block and which referenced Python exceptions (`ValueError`) this SDK never
+  throws.
+
+### Changed
+
+- **Argument validation in `./rpc` now throws `ValidationError` instead of a
+  plain `Error`.** This makes the documented "every error the SDK throws
+  extends `CanopyError`" true for the most common developer mistake — an
+  invalid address was previously the one failure that escaped the hierarchy.
+  `catch (e)` and `e.message` checks are unaffected; code matching on
+  `e.name === "Error"` or `e.constructor === Error` needs updating.
+- **Address and hash arguments are now checked for hex content, not just
+  length.** A 40-character non-hex string (or a 64-character non-hex hash)
+  that previously reached the node and came back as an opaque RPC failure is
+  now rejected up front with a `ValidationError`. Hashes are also lowercased
+  on the way out, matching how addresses were already normalized.
+- `blockByHeight` and the ID-taking queries now reject `NaN`, which previously
+  slipped past their `< 0` checks and was forwarded to the node.
+
 ### Fixed
 
 - `NodePool.withFailover()` in pinned mode now preserves `RpcError`'s type
