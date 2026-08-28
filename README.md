@@ -162,6 +162,20 @@ RPC calls retry transient failures (network errors, 5xx) with exponential
 backoff and jitter by default (3 attempts). Disable per-call with
 `{ retry: false }`, or tune `{ retry: { maxAttempts, baseDelayMs, maxDelayMs } }`.
 
+## Example: an end-to-end dApp
+
+[`examples/guestbook`](./examples/guestbook) is a complete, runnable Canopy
+appchain dApp built on this SDK: a Go plugin that adds a custom `post_message`
+transaction and stores an append-only on-chain guestbook, plus a React frontend
+that generates a key in the browser, signs with `createAndSignTransaction`, and
+broadcasts straight to the node — no backend.
+
+It is the reference for wiring a **plugin-defined** message type into the SDK
+via `createProtobufEncoder` + `registerMessageType`. See its
+[README](./examples/guestbook/README.md) to run it, and
+[ARCHITECTURE.md](./examples/guestbook/ARCHITECTURE.md) for how the node,
+plugin, and client divide the work.
+
 ## Versioning
 
 This package follows [Semantic Versioning](https://semver.org/). Type
