@@ -1,0 +1,19 @@
+{
+  "name": "canopy-ts-examples",
+  "private": true,
+  "description": "Runnable examples for @canopynetwork/canopy-ts: sending transactions, local keystore import/generation, and multi-node failover.",
+  "type": "module",
+  "scripts": {
+    "01:send": "tsx 01-send-transaction/send-tx.ts",
+    "02:keystore": "tsx 02-keystore-import/keystore.ts",
+    "03:failover": "tsx 03-node-pool-failover/failover.ts"
+  },
+  "dependencies": {
+    "@canopynetwork/canopy-ts": "^0.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.0.0"
+  }
+}

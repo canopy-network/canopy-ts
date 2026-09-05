@@ -162,6 +162,13 @@ RPC calls retry transient failures (network errors, 5xx) with exponential
 backoff and jitter by default (3 attempts). Disable per-call with
 `{ retry: false }`, or tune `{ retry: { maxAttempts, baseDelayMs, maxDelayMs } }`.
 
+## Examples
+
+Runnable, end-to-end example scripts live in [`examples/`](./examples):
+sending a transaction (`createAndSignTransaction` + `submitTx`), client-side
+keystore generation/Go-keystore import, and multi-node failover with
+`NodePool`.
+
 ## Versioning
 
 This package follows [Semantic Versioning](https://semver.org/). Type
