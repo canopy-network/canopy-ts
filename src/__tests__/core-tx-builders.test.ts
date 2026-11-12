@@ -12,7 +12,7 @@ const PUBLIC_KEY_HEX = derivePublicKey(PRIVATE_KEY_HEX, CurveType.BLS12381);
 // against a real Canopy devnet node: the node's custom JSON unmarshaling for
 // these message types expects HEX byte strings (not base64) and several
 // deliberately non-camelCase wire keys (documented per-type below).
-describe("Core Transaction Builders (all 15 types)", () => {
+describe("Core Transaction Builders (all registered types)", () => {
   it("send: core format with hex addresses", () => {
     const fromAddress = "aa".repeat(20);
     const toAddress = "bb".repeat(20);
@@ -459,6 +459,35 @@ describe("Core Transaction Builders (all 15 types)", () => {
       startHeight: 10,
       endHeight: 20,
       signer: bytesToHex(hexToBytes(signer)),
+    });
+    expect(tx.msg).not.toHaveProperty("proposalHash");
+  });
+
+  it("changeByzantineOutput: core format uses canonical governance wire fields", () => {
+    const validatorAddress = "aa".repeat(20);
+    const outputAddress = "bb".repeat(20);
+    const signer = "cc".repeat(20);
+    const tx = createAndSignTransaction(
+      {
+        type: "changeByzantineOutput",
+        msg: { validatorAddress, outputAddress, signer, startHeight: 10, endHeight: 20 },
+        fee: 10000,
+        networkID: 1,
+        chainID: 1,
+        height: 5,
+      },
+      PRIVATE_KEY_HEX,
+      PUBLIC_KEY_HEX,
+      CurveType.BLS12381,
+      { format: "core" }
+    ) as any;
+
+    expect(tx.msg).toEqual({
+      validatorAddress,
+      outputAddress,
+      signer,
+      startHeight: 10,
+      endHeight: 20,
     });
     expect(tx.msg).not.toHaveProperty("proposalHash");
   });

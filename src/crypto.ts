@@ -10,6 +10,7 @@ export type {
   TransactionSignature,
   TransactionMessage,
   TransactionParams,
+  MessageChangeByzantineOutputParams,
 } from "./types.js";
 
 export { signMessage, derivePublicKey } from "./signing.js";

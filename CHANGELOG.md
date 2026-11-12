@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added canonical protobuf signing and core protojson support for the
+  `changeByzantineOutput` governance transaction.
+
 ### Fixed
 
 - `NodePool.withFailover()` in pinned mode now preserves `RpcError`'s type

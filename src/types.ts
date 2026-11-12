@@ -31,6 +31,15 @@ export interface TransactionParams {
   height: number;
 }
 
+export interface MessageChangeByzantineOutputParams extends TransactionMessage {
+  validatorAddress: string;
+  outputAddress: string;
+  signer: string;
+  startHeight: number;
+  endHeight: number;
+  proposalHash?: string;
+}
+
 export interface WalletCredentials {
   encryptedPrivateKey: string;
   salt: string;
