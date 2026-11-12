@@ -173,6 +173,16 @@ const root = protobuf.Root.fromJSON({
             signer: { type: "bytes", id: 6 },
           },
         },
+        MessageChangeByzantineOutput: {
+          fields: {
+            validator_address: { type: "bytes", id: 1 },
+            output_address: { type: "bytes", id: 2 },
+            signer: { type: "bytes", id: 3 },
+            start_height: { type: "uint64", id: 4 },
+            end_height: { type: "uint64", id: 5 },
+            proposal_hash: { type: "string", id: 6 },
+          },
+        },
         StringWrapper: {
           fields: {
             value: { type: "string", id: 1 },
@@ -218,6 +228,7 @@ const MsgDexLimitOrder = root.lookupType("types.MessageDexLimitOrder");
 const MsgDexLiquidityDeposit = root.lookupType("types.MessageDexLiquidityDeposit");
 const MsgDexLiquidityWithdraw = root.lookupType("types.MessageDexLiquidityWithdraw");
 const MsgChangeParameter = root.lookupType("types.MessageChangeParameter");
+const MsgChangeByzantineOutput = root.lookupType("types.MessageChangeByzantineOutput");
 const StringWrapper = root.lookupType("types.StringWrapper");
 const UInt64Wrapper = root.lookupType("types.UInt64Wrapper");
 
@@ -538,6 +549,26 @@ const MESSAGE_REGISTRY: Record<
       startHeight: msg.startHeight,
       endHeight: msg.endHeight,
       signer: bytesToHex(hexToBytes(msg.signer)),
+    }),
+  },
+  changeByzantineOutput: {
+    typeName: "types.MessageChangeByzantineOutput",
+    encode: (msg) =>
+      MsgChangeByzantineOutput.encode(
+        MsgChangeByzantineOutput.create(proto3Fields({
+          validator_address: hexToBytes(msg.validatorAddress),
+          output_address: hexToBytes(msg.outputAddress),
+          signer: hexToBytes(msg.signer),
+          start_height: msg.startHeight,
+          end_height: msg.endHeight,
+        }))
+      ).finish(),
+    toProtojson: (msg) => ({
+      validatorAddress: bytesToHex(hexToBytes(msg.validatorAddress)),
+      outputAddress: bytesToHex(hexToBytes(msg.outputAddress)),
+      signer: bytesToHex(hexToBytes(msg.signer)),
+      startHeight: msg.startHeight,
+      endHeight: msg.endHeight,
     }),
   },
 };
